@@ -28,6 +28,7 @@ sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
 PY
 }
 
+DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/sshsess.py"
 W="${SSHSESS_TEST_DIR:-/tmp/sshsess-test}"
 PORT="${SSHSESS_TEST_PORT:-2222}"
 ALIAS=local-test
@@ -108,7 +109,7 @@ print_usage_block() {
 Use it with sshsess like this (the login shell here may not be POSIX, so most
 cases need --shell):
 
-  S=~/.claude/skills/ssh-session/scripts/sshsess.py
+  S=$DRIVER
   \$S new NAME $ALIAS --shell 'bash -i' -- -F $W/ssh_config
 EOF
 }

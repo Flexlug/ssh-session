@@ -1,0 +1,13 @@
+{
+  "name": "ssh-session",
+  "description": "Persistent SSH sessions for agents: one live connection per named session, so cwd, env vars, venvs and background jobs survive between tool calls.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Flexlug",
+    "url": "https://github.com/Flexlug"
+  },
+  "homepage": "https://github.com/Flexlug/ssh-session",
+  "repository": "https://github.com/Flexlug/ssh-session",
+  "license": "MIT",
+  "keywords": ["ssh", "remote", "pty", "automation", "devops"]
+}

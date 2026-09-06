@@ -1,8 +1,9 @@
 # ssh-session
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](scripts/sshsess.py)
-[![stdlib only](https://img.shields.io/badge/deps-stdlib%20only-green)](scripts/sshsess.py)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](skills/ssh-session/scripts/sshsess.py)
+[![stdlib only](https://img.shields.io/badge/deps-stdlib%20only-green)](skills/ssh-session/scripts/sshsess.py)
 [![Linux · macOS](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS-lightgrey)](#ограничения)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Скилл для агентных харнесов (**Claude Code** в первую очередь), который держит
 живую SSH-сессию к серверу и гоняет по ней команды. Одно соединение, один
@@ -49,38 +50,41 @@ SSH-инструменты рассчитаны на него: если выле
 
 ## Установка
 
-Скилл — это папка с `SKILL.md` по [спецификации Agent Skills](https://agentskills.io);
-внутри только Python-скрипт на stdlib, так что установка сводится к копированию.
+Скилл — это папка `skills/ssh-session/` с `SKILL.md` по
+[спецификации Agent Skills](https://agentskills.io); внутри только Python-скрипт
+на stdlib, так что установка сводится к копированию. Репозиторий заодно оформлен
+как маркетплейс плагинов Claude Code — для него есть способ покороче.
 
-**Claude Code** (пользовательский уровень):
+**Claude Code, плагином** (с версионированием и `/plugin update`):
 
-```bash
-git clone https://github.com/Flexlug/ssh-session ~/.claude/skills/ssh-session
-chmod +x ~/.claude/skills/ssh-session/scripts/sshsess.py
+```
+/plugin marketplace add Flexlug/ssh-session
+/plugin install ssh-session@flexlug
 ```
 
-Проектный уровень — то же самое в `.claude/skills/ssh-session` внутри репозитория.
+**Вручную, в любой харнес** — склонировать и положить папку скилла куда надо:
 
-**Другие харнесы** — тот же клон, другой каталог:
+```bash
+git clone https://github.com/Flexlug/ssh-session /tmp/ssh-session
+cp -r /tmp/ssh-session/skills/ssh-session ~/.claude/skills/
+```
 
 | Харнес | Куда класть |
 |---|---|
-| Claude Code, Claude Desktop | `~/.claude/skills/` |
+| Claude Code, Claude Desktop | `~/.claude/skills/` (или `.claude/skills/` в проекте) |
 | Codex CLI | `~/.codex/skills/` |
 | Gemini CLI | `~/.gemini/skills/` |
 | GitHub Copilot / VS Code | `~/.config/skills/` (или `.github/skills/` в репозитории) |
 | Cursor, OpenCode, Goose, Amp | см. документацию клиента — все читают `SKILL.md` |
 
-Универсальный вариант, если в системе есть `gh` ≥ 2.90:
-
-```bash
-gh skill install Flexlug/ssh-session
-```
+Есть ещё универсальный `gh skill install Flexlug/ssh-session` (GitHub CLI 2.90+),
+но им я не пользовался — работоспособность на этом репозитории не проверял.
 
 Проверка, что драйвер жив (он работает и сам по себе, без всякого агента):
 
 ```bash
 ~/.claude/skills/ssh-session/scripts/sshsess.py ls
+# no sessions
 ```
 
 ## Требования
@@ -97,7 +101,7 @@ gh skill install Flexlug/ssh-session
 ## Быстрый старт
 
 ```bash
-S=~/.claude/skills/ssh-session/scripts/sshsess.py
+S=~/.claude/skills/ssh-session/scripts/sshsess.py   # при установке плагином путь другой
 
 $S new box myhost.example.com    # открыть сессию с именем box
 $S run box uname -sr             # выполнить, получить вывод и код возврата
@@ -209,11 +213,12 @@ chmod 600 ~/.config/sshsess/secrets.json
 трогается, всё живёт в одном рабочем каталоге и удаляется вместе с ним.
 
 ```bash
+cd skills/ssh-session
 bash tests/local-sshd.sh start     # печатает цель для подключения
 bash tests/local-sshd.sh stop      # убивает и удаляет рабочий каталог
 ```
 
-Смоук-набор — в [`tests/TESTCASES.md`](tests/TESTCASES.md).
+Смоук-набор — в [`tests/TESTCASES.md`](skills/ssh-session/tests/TESTCASES.md).
 
 ## Как это устроено
 
@@ -232,10 +237,12 @@ bash tests/local-sshd.sh stop      # убивает и удаляет рабоч
    первого маркера — то есть вне вырезаемой области.
 
 Полное описание — включая подводные камни, таблицу диагностики и коды
-возврата — в [`SKILL.md`](SKILL.md). Это же файл, который читает агент.
+возврата — в [`SKILL.md`](skills/ssh-session/SKILL.md). Это же файл, который читает агент.
 
 ## Авторы
 
 Разработано в паре: **Flexlug** — идея, постановка, тестирование;
 **Claude (Anthropic)** — реализация, обкатка на живых хостах, документация.
 Соавторство отражено в коммитах.
+
+Лицензия — [MIT](LICENSE).

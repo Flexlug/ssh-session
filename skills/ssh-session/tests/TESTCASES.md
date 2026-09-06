@@ -7,8 +7,9 @@ sshd** из `tests/local-sshd.sh`. Никаких удалённых хосто�
 ## Подготовка
 
 ```bash
-bash ~/.claude/skills/ssh-session/tests/local-sshd.sh start
-S=~/.claude/skills/ssh-session/scripts/sshsess.py
+SKILL=$(dirname "$(find ~/.claude ~/.config .claude -path '*ssh-session/scripts/sshsess.py' 2>/dev/null | head -1)")/..
+bash "$SKILL/tests/local-sshd.sh" start
+S="$SKILL/scripts/sshsess.py"
 C=/tmp/sshsess-test/ssh_config
 ```
 
