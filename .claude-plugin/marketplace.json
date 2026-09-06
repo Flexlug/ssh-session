@@ -10,7 +10,7 @@
       "name": "ssh-session",
       "source": "./",
       "description": "Persistent SSH sessions for agents: one live connection per named session, so cwd, env vars, venvs and background jobs survive between tool calls. Stdlib-only Python driver, no tmux and no pip packages.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": {
         "name": "Flexlug"
       },
