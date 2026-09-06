@@ -246,8 +246,10 @@ operations go through the unix socket: `send` / `info` / `kill`.
    executing until it has read the closing brace, so all the echo ends up
    **before** the first marker's output — that is, outside the region being cut.
 
-The full description — pitfalls, the diagnostics table and the exit codes — is in
-[`SKILL.md`](skills/ssh-session/SKILL.md). That is the very file the agent reads.
+The full description is in [`SKILL.md`](skills/ssh-session/SKILL.md) — the very
+file the agent reads — plus the `references/` files next to it, which it opens on
+demand: pitfalls, the diagnostics table and exit codes, interactive prompts and
+TUIs, parallel sessions, platform notes and internals.
 
 ## Authors
 
