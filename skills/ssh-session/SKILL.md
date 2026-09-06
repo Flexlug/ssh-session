@@ -1,124 +1,130 @@
 ---
 name: ssh-session
-description: Держит живую SSH-сессию к серверу и гоняет по ней команды без нового хендшейка на каждую — cwd, переменные, venv и фоновые задачи сохраняются между вызовами. Обязательно используй этот скилл, когда нужно выполнить больше одной команды на удалённом хосте, поработать с сервером «по шагам», подключиться по SSH, настроить/задеплоить что-то на VPS, отвечать на интерактивные промпты (sudo, host key, REPL, TUI) или читать вывод долгой команды. Триггеры: ssh, подключись к серверу, зайди на сервер, на сервере выполни, remote shell, VPS, деплой на сервер, persistent ssh session, run commands on host.
+description: Keeps a live SSH session to a server and runs commands over it without a fresh handshake each time — cwd, exported vars, venvs and background jobs persist between calls. Use this skill whenever you need to run more than one command on a remote host, work through a server step by step, connect over SSH, set up or deploy something on a VPS, answer interactive prompts (sudo, host key, REPL, TUI) or read the output of a long-running command. Triggers - ssh, connect to the server, log in to the server, run this on the server, remote shell, VPS, deploy to a server, persistent ssh session, run commands on host.
 ---
 
 # Persistent SSH sessions
 
-Обычный `ssh host "cmd"` платит полный хендшейк за каждую команду и каждый раз
-стартует **новый** shell — поэтому `cd`, `export`, активированный venv и фоновые
-задачи теряются между вызовами. Этот скилл держит одно соединение живым в
-фоновом демоне, который владеет pty, и отправляет команды в **тот же** shell.
+A plain `ssh host "cmd"` pays a full handshake per command and starts a **new**
+shell every time — so `cd`, `export`, an activated venv and background jobs are
+all lost between calls. This skill keeps one connection alive in a background
+daemon that owns a pty, and sends commands into the **same** shell.
 
-Замерено на реальном хосте: 10 команд через новый ssh каждый раз — **25.2 s**,
-через живую сессию — **3.5 s**.
+Measured on a real host: 10 commands over a fresh ssh each time — **25.2 s**,
+over a live session — **3.5 s**.
 
-Драйвер: `scripts/sshsess.py` рядом с этим файлом — исполняемый, можно запускать
-напрямую (Python 3, только stdlib: ни tmux, ни pip-пакетов). Полный путь зависит
-от способа установки: при ручной это `~/.claude/skills/ssh-session/scripts/`, при
-установке плагином — каталог внутри `~/.claude/plugins/`. Найди его один раз и
-запомни в ответе, чтобы не искать заново:
+The driver is `scripts/sshsess.py` next to this file — executable, runnable
+directly (Python 3, stdlib only: no tmux, no pip packages). Its full path
+depends on how the skill was installed: a manual install puts it under
+`~/.claude/skills/ssh-session/scripts/`, a plugin install under
+`~/.claude/plugins/`. Locate it once and keep the path in your reply so you do
+not have to search again:
 
 ```bash
 find ~/.claude ~/.config .claude -path '*ssh-session/scripts/sshsess.py' 2>/dev/null | head -1
 ```
 
-В примерах ниже драйвер сокращён до `$S`; задавай `S=...` в начале того же вызова
-Bash — между отдельными вызовами переменные не сохраняются, там подставляй полный
-путь. Если локальная оболочка fish, присваивание другое: `set S ...`.
+In the examples below the driver is shortened to `$S`; set `S=...` at the start
+of the same Bash call — variables do not survive between separate calls, so
+there you have to substitute the full path. If your local shell is fish, the
+assignment differs: `set S ...`.
 
-## Требования
+## Requirements
 
-`python3` и `ssh` — больше ничего. Ни pip-пакетов, ни tmux, ни Node.
+`python3` and `ssh` — nothing else. No pip packages, no tmux, no Node.
 
-Проверено на Python 3.8 — полный цикл `new`/`run`/`kill`, включая разбор
-`-- ssh-аргументы`, так что подойдёт любой интерпретатор от 3.8 и новее.
+Verified on Python 3.8 — the full `new`/`run`/`kill` cycle, including parsing of
+`-- ssh arguments`, so any interpreter from 3.8 up will do.
 
-**Опорные платформы — Linux и macOS. Windows не поддерживается**, и это
-решение, а не незакрытый долг: там нет ни pty, ни `fork()`, а ConPTY потребовал
-бы стороннюю зависимость вроде `pywinpty` и сломал бы главное свойство скилла —
-только stdlib, ставить нечего. Скрипт выходит с кодом 1 и понятным сообщением.
-Для Windows есть WSL: внутри него это обычный Linux и всё работает как есть.
+**The reference platforms are Linux and macOS. Windows is not supported**, and
+that is a decision rather than an open debt: there is no pty and no `fork()`
+there, and ConPTY would require a third-party dependency such as `pywinpty`,
+breaking the skill's main property — stdlib only, nothing to install. The script
+exits with code 1 and a clear message. WSL covers Windows: inside it this is
+ordinary Linux and everything works as is.
 
-Из этого же следует, чего делать **не** нужно: заменять unix-сокет файловым
-каналом или добавлять режим без pty. Обе идеи к Windows не приближают — упор
-не в канал, а в pty и `fork()`.
+The same follows for what **not** to do: do not replace the unix socket with a
+file-based channel, and do not add a pty-less mode. Neither idea gets any closer
+to Windows — the obstacle is not the channel, it is the pty and `fork()`.
 
-**Со стороны клиента** проверено на Linux; macOS не тестировался (негде), но
-специфичные для него места закрыты:
+**On the client side** this is tested on Linux; macOS is untested (no machine to
+test on), but the parts specific to it are covered:
 
-- **Каталог состояния.** Порядок: `SSHSESS_DIR` → `$XDG_RUNTIME_DIR` (Linux) →
-  `$TMPDIR` на macOS → `~/.cache/sshsess`. На macOS `$TMPDIR` — приватный
-  per-user каталог `0700`, который система чистит, то есть ближайший аналог
-  `XDG_RUNTIME_DIR`. Постоянный `~/.cache` остался только последним запасным
-  вариантом: в `out.log` может попасть пароль, если удалённый промпт забыл
-  выключить эхо, и такому файлу не место на диске навсегда.
-- **Права.** Каталоги `0700`, файлы `0600` — проверено во всех расположениях,
-  включая апгрейд каталога, созданного старой версией с `0755`.
-- **Длина пути AF_UNIX** там 104 байта против 108 на Linux. С реальным
-  macOS-префиксом (`/var/folders/xx/<хеш>/T/sshsess`, ~50 байт) на имя сессии
-  остаётся ~45 символов. Проверено на эмуляции той же длины: 101 байт работает,
-  104 отказывает внятным сообщением, а не «daemon failed to start».
+- **State directory.** The order is: `SSHSESS_DIR` → `$XDG_RUNTIME_DIR` (Linux)
+  → `$TMPDIR` on macOS → `~/.cache/sshsess`. On macOS `$TMPDIR` is a private
+  per-user `0700` directory that the system cleans, i.e. the closest analogue of
+  `XDG_RUNTIME_DIR`. The persistent `~/.cache` is left only as the last fallback:
+  a password can land in `out.log` if a remote prompt forgot to turn echo off,
+  and such a file has no business staying on disk forever.
+- **Permissions.** Directories `0700`, files `0600` — verified in every location,
+  including upgrading a directory created by an older version with `0755`.
+- **The AF_UNIX path length** there is 104 bytes against 108 on Linux. With a
+  real macOS prefix (`/var/folders/xx/<hash>/T/sshsess`, ~50 bytes) that leaves
+  ~45 characters for the session name. Verified on an emulation of the same
+  length: 101 bytes works, 104 refuses with a clear message rather than "daemon
+  failed to start".
 
-Тестовый стенд тоже переносим: `sshd` ищется по нескольким путям включая
-Homebrew, занятость порта проверяется через Python, а не через Linux-only `ss`.
+The test stand is portable too: `sshd` is looked up in several paths including
+Homebrew, and port occupancy is checked through Python rather than the
+Linux-only `ss`.
 
-**Со стороны сервера** зависимость не от дистрибутива, а от shell:
+**On the server side** the dependency is not the distribution but the shell:
 
-| Нужно для | Требование | Где не работает |
+| Needed for | Requirement | Where it breaks |
 |---|---|---|
-| `run` (маркеры, `$?`) | любой POSIX-shell | `fish`, `csh` → лечится `--shell 'bash -i'` |
-| слой 3 (занятость) | bracketed paste, т.е. readline/zle | `dash`, `ash`/busybox → проверка отвечает «неизвестно» и не защищает |
+| `run` (markers, `$?`) | any POSIX shell | `fish`, `csh` → fixed by `--shell 'bash -i'` |
+| layer 3 (busy check) | bracketed paste, i.e. readline/zle | `dash`, `ash`/busybox → the check answers "unknown" and does not protect |
 
-Конструкт обёртки проверен в busybox `ash` — маркеры, `$?` и завершающий `&`
-работают, так что ядро переносимо и туда. Переменные гашения
-(`DEBIAN_FRONTEND`, `NEEDRESTART_MODE`) специфичны для Debian, но на других
-системах это просто неизвестные переменные окружения — вреда нет. Шаблоны
-подтверждений покрывают `apt`, `dnf`, `pacman` и `zypper`.
+The wrapper construct is verified in busybox `ash` — markers, `$?` and the
+trailing `&` all work, so the core is portable there as well. The muting
+variables (`DEBIAN_FRONTEND`, `NEEDRESTART_MODE`) are Debian-specific, but on
+other systems they are simply unknown environment variables — no harm done. The
+confirmation patterns cover `apt`, `dnf`, `pacman` and `zypper`.
 
-Для проверок есть локальный стенд, не требующий ни одного удалённого хоста:
-`tests/local-sshd.sh start` поднимает временный sshd на 127.0.0.1 (без sudo, без
-системных изменений, `~/.ssh` не трогается), `tests/TESTCASES.md` — смоук-набор.
+For checks there is a local stand that needs no remote host at all:
+`tests/local-sshd.sh start` brings up a temporary sshd on 127.0.0.1 (no sudo, no
+system-wide changes, `~/.ssh` is never touched), and `tests/TESTCASES.md` is the
+smoke set.
 
-## Быстрый старт
+## Quick start
 
 ```bash
-S=/путь/к/ssh-session/scripts/sshsess.py   # см. выше; в fish: set S ...
+S=/path/to/ssh-session/scripts/sshsess.py   # see above; in fish: set S ...
 
-$S new box server.example.com     # открыть сессию с именем box
-$S run box uname -sr              # выполнить, получить вывод и код возврата
-$S read box --tail 40             # посмотреть, что там происходит
-$S send box --key C-c             # отправить сырой ввод
-$S kill box                       # закрыть
+$S new box server.example.com     # open a session named box
+$S run box uname -sr              # run it, get the output and the exit code
+$S read box --tail 40             # look at what is going on in there
+$S send box --key C-c             # send raw input
+$S kill box                       # close it
 ```
 
-Сессия живёт независимо от процесса, который её создал: между вызовами можно
-делать что угодно, она останется на месте. Проверено — примеры ниже гонялись
-десятками отдельных вызовов Bash в течение получаса.
+A session lives independently of the process that created it: do whatever you
+like between calls, it stays where it was. Verified — the examples below were
+driven by dozens of separate Bash calls over half an hour.
 
-## Что чем делать
+## What to use for what
 
-Это главное решение при работе со скиллом:
+This is the main decision when working with the skill:
 
-| Задача | Инструмент |
+| Task | Tool |
 |---|---|
-| Выполнить команду, получить вывод и код возврата | `run` — почти всегда он |
-| Ответить на промпт (sudo, host key, `yes/no`) | `send` |
-| Работать в REPL (`python3`, `psql`, `mysql`) | `send` + `read` |
-| Дождаться строки в выводе уже запущенного процесса | `wait` |
-| Посмотреть, что на «экране» сейчас | `read` |
+| Run a command, get output and an exit code | `run` — almost always this one |
+| Answer a prompt (sudo, host key, `yes/no`) | `send` |
+| Work in a REPL (`python3`, `psql`, `mysql`) | `send` + `read` |
+| Wait for a line in the output of an already running process | `wait` |
+| See what is on the "screen" right now | `read` |
 
-`run` — рабочая лошадка. Он оборачивает команду в группу `{ ... }` с двумя
-маркерами, поэтому возвращает **чистый** вывод (без приглашения и эха) и
-**настоящий** код возврата удалённой команды:
+`run` is the workhorse. It wraps the command in a `{ ... }` group with two
+markers, so it returns **clean** output (no prompt, no echo) and the **real**
+exit code of the remote command:
 
 ```bash
-$S run box 'ls /nope-does-not-exist'; echo "код=$?"
+$S run box 'ls /nope-does-not-exist'; echo "rc=$?"
 # ls: cannot access '/nope-does-not-exist': No such file or directory
-# код=2
+# rc=2
 ```
 
-Состояние сохраняется — в этом весь смысл:
+State persists — that is the entire point:
 
 ```bash
 $S run box 'cd /etc && export MYVAR=hello'
@@ -127,74 +133,78 @@ $S run box 'pwd; echo "MYVAR=$MYVAR"'
 # MYVAR=hello
 ```
 
-Вывод побайтово точен: 20 000 строк через сессию дают тот же md5, что и
-локально, строка в 3000 символов не рвётся (pty шириной 200 колонок ничего не
-переносит — переносом занимается эмулятор терминала, а его здесь нет).
+Output is byte-exact: 20,000 lines through a session give the same md5 as
+locally, and a 3000-character line is not broken up (the pty is 200 columns wide
+and wraps nothing — wrapping is the terminal emulator's job, and there is no
+emulator here).
 
-## Команды
+## Commands
 
 ```bash
-# --- сессии ---
+# --- sessions ---
 $S new NAME TARGET [--timeout 40] [--shell 'bash -i'] [--force] [--no-harden] [-- SSH_ARGS...]
-$S ls                      # все сессии: live/dead, хост, владелец, размер лога
-$S info NAME               # pid, аптайм, владелец, путь к логу (и для мёртвой тоже)
-$S reconnect NAME          # переоткрыть с теми же ssh-аргументами и --shell
-$S truncate NAME           # очистить лог живой сессии, не рвя соединение
+$S ls                      # all sessions: live/dead, host, owner, log size
+$S info NAME               # pid, uptime, owner, log path (works for a dead one too)
+$S reconnect NAME          # reopen with the same ssh arguments and --shell
+$S truncate NAME           # clear a live session's log without dropping the connection
 $S kill NAME | --all
-$S prune                   # забыть мёртвые сессии вместе с их логами
+$S prune                   # forget dead sessions along with their logs
 
-# --- выполнение ---
+# --- execution ---
 $S run [--timeout 120] [--yes] [--no-auto] [--force] [--allow-exit] NAME CMD...
 $S expect NAME [--once] [--yes] [--dry-run] [--list-rules] [--timeout 120]
 $S send NAME [TEXT] [--key KEY] [--no-enter] [--paste] [--wait SEC]
-$S interrupt NAME          # Ctrl-C удалённой команде И разблокировать ждущий run
+$S interrupt NAME          # Ctrl-C to the remote command AND unblock a waiting run
 $S read NAME [--tail N] [--all] [--since OFFSET] [--raw] [--offset] [--no-filter]
 $S wait NAME REGEX [--timeout 60] [--from-start] [--since OFFSET]
 ```
 
-`--timeout` у `run` стоит **до** имени сессии: всё после имени уходит в
-удалённую команду целиком, чтобы её собственные флаги не съел argparse
-(`$S run box ls -la` работает как ожидается).
+`run`'s `--timeout` goes **before** the session name: everything after the name
+is passed to the remote command as a whole, so that its own flags are not eaten
+by argparse (`$S run box ls -la` works as expected).
 
-Дополнительные аргументы ssh — после `--`, они подставляются **перед** хостом
-(иначе ssh считает их удалённой командой):
+Extra ssh arguments go after `--`, and are inserted **before** the host
+(otherwise ssh treats them as the remote command):
 
 ```bash
 $S new box 203.0.113.10 --timeout 12 -- -p 2222 -l deploy
 ```
 
-Если login shell на хосте не POSIX (fish, csh), `run` работать не сможет —
-задай оболочку явно. Это же лечит логины, которые тормозят на terminal-запросах:
+If the login shell on the host is not POSIX (fish, csh), `run` will not be able
+to work — set the shell explicitly. The same cures logins that stall on terminal
+queries:
 
 ```bash
 $S new box myhost --shell 'bash -i'
 ```
 
-`read` читается как расшифровка сеанса: команды, отправленные через `run`, видны
-с префиксом `> ` (это строки продолжения от обёртки), а ушедшие через `send` —
-как обычное эхо с приглашением, без префикса. Служебные маркеры `run` скрыты
-(`--no-filter` покажет их, `--raw` отдаст сырой поток с escape-последова­тельностями).
+`read` reads like a transcript of the session: commands sent through `run` show
+up with a `> ` prefix (those are continuation lines from the wrapper), while
+those sent through `send` appear as ordinary echo with a prompt, without the
+prefix. `run`'s internal markers are hidden (`--no-filter` shows them, `--raw`
+gives the raw stream with escape sequences).
 
-Клавиши для `send --key`: `C-c`, `C-d`, `C-z` (любая `C-<буква>`), `Enter`,
-`Tab`, `Escape`, `Up`/`Down`/`Left`/`Right`, `Home`, `End`, `PgUp`, `PgDn`,
-`Space`, `BSpace`. Флаг повторяемый.
+Keys for `send --key`: `C-c`, `C-d`, `C-z` (any `C-<letter>`), `Enter`, `Tab`,
+`Escape`, `Up`/`Down`/`Left`/`Right`, `Home`, `End`, `PgUp`, `PgDn`, `Space`,
+`BSpace`. The flag is repeatable.
 
-### Интерактив: REPL
+### Interactive work: REPLs
 
 ```bash
 $S send box 'python3 -q'
 $S wait box '>>>'
-$S send box '2+2' --wait 1.5      # отправить и через 1.5 s показать, что пришло
+$S send box '2+2' --wait 1.5      # send, then after 1.5 s show what came back
 # 2+2
 # 4
-$S send box --key C-d             # выйти из REPL
+$S send box --key C-d             # leave the REPL
 ```
 
-Многострочный ввод отправляй **с `--paste`**. Современные REPL (PyREPL в Python
-3.13+) сами добавляют отступ каждой строке продолжения, поэтому обычный `send`
-складывает твои отступы со своими и блок падает в `IndentationError`. `--paste`
-оборачивает текст в bracketed paste, и он принимается как есть. Незакрытый блок
-(`...` вместо `>>>`) закрывается **пустой строкой** — это `send` без текста:
+Send multi-line input **with `--paste`**. Modern REPLs (PyREPL in Python 3.13+)
+add indentation to every continuation line themselves, so a plain `send` stacks
+your indentation on top of theirs and the block dies with `IndentationError`.
+`--paste` wraps the text in bracketed paste, and it is accepted as is. An
+unclosed block (`...` instead of `>>>`) is closed by an **empty line** — that is
+a `send` with no text:
 
 ```bash
 $S send box --paste 'def fib(n):
@@ -203,26 +213,27 @@ $S send box --paste 'def fib(n):
         a, b = b, a + b
     return a
 '
-$S send box '' --wait 1            # пустая строка закрывает блок
+$S send box '' --wait 1            # an empty line closes the block
 $S send box 'fib(30)' --wait 2     # -> 832040
 ```
 
-В `read` такой сеанс выглядит рвано (`>>> f>>> fi>>> fib…`): PyREPL перерисовывает
-строку через перемещение курсора, а не через `\r`, и склеить это без полноценного
-эмулятора терминала нельзя. На результат не влияет — только на читаемость.
+In `read` such a session looks ragged (`>>> f>>> fi>>> fib…`): PyREPL redraws
+the line by moving the cursor rather than with `\r`, and gluing that back
+together is impossible without a full terminal emulator. It does not affect the
+result — only readability.
 
-## Несколько сессий одновременно
+## Several sessions at once
 
-Сессий может быть сколько нужно, в том числе к одному хосту. Каждая — отдельный
-демон с отдельным соединением и своим shell'ом, они не пересекаются: проверено,
-что `cd /etc` в одной не влияет на другую.
+You can have as many sessions as you need, including several to the same host.
+Each is a separate daemon with its own connection and its own shell, and they do
+not intersect: verified that `cd /etc` in one does not affect another.
 
-Это штатный способ делать параллельную работу — запустить процесс в одной
-сессии и смотреть за ним из другой. Важная деталь про темп: **один вызов Bash у
-агента стоит около 15 секунд**, поэтому «посмотреть три раза с паузами»
-отдельными вызовами невозможно для задачи короче минуты — к первому же замеру
-всё уже закончится. Паузы делай удалённым `sleep` **внутри** `run`, а серию
-замеров — одним вызовом:
+This is the intended way to do parallel work — start a process in one session
+and watch it from another. An important detail about pacing: **one Bash call
+costs the agent about 15 seconds**, so "look three times with pauses" as
+separate calls is impossible for a task shorter than a minute — by the first
+measurement everything is already over. Make the pauses with a remote `sleep`
+**inside** `run`, and take a series of measurements in a single call:
 
 ```bash
 $S new worker server.example.com
@@ -230,102 +241,108 @@ $S new watcher server.example.com
 
 $S run worker 'rm -f /tmp/job.log; (for i in $(seq 1 10); do echo "tick-$i" >> /tmp/job.log; sleep 1; done) &'
 $S run watcher 'wc -l < /tmp/job.log; sleep 3; wc -l < /tmp/job.log; sleep 3; wc -l < /tmp/job.log'
-$S run worker 'jobs'      # worker при этом не заблокирован
+$S run worker 'jobs'      # meanwhile worker is not blocked
 ```
 
-**Имя сессии — общий ресурс машины.** Все сессии лежат в одном каталоге, поэтому
-кто угодно с тем же именем попадёт в тот же shell. Что есть и чего нет:
+**A session name is a machine-wide resource.** All sessions live in one
+directory, so anyone using the same name lands in the same shell. What exists
+and what does not:
 
-- `ls` и `info` показывают владельца (`same owner` / `other:5367636a`);
-- `new` с занятым **живым** именем отказывается (код 2) и не даёт молча
-  захватить чужой shell. Мёртвое имя переиспользуется обычным `new`, `--force`
-  для этого не нужен;
-- `kill --all` закроет и чужие сессии тоже — в общем каталоге убивай по имени.
+- `ls` and `info` show the owner (`same owner` / `other:5367636a`);
+- `new` refuses a name held by a **live** session (code 2) and will not silently
+  hijack someone else's shell. A dead name is reused by an ordinary `new`;
+  `--force` is not needed for that;
+- `kill --all` will close other people's sessions too — in a shared directory,
+  kill by name.
 
-**Автоматической защиты между параллельными агентами одного чата нет, и быть не
-может.** Проверено: subagent наследует `CLAUDE_CODE_SESSION_ID` родителя без
-изменений, его окружение побайтово совпадает с родительским. Поэтому все
-subagent'ы одного чата видны друг другу как `same owner`, и `ls` не отличит
-твою сессию от сессии соседнего агента.
+**There is no automatic protection between parallel agents of one chat, and
+there cannot be.** Verified: a subagent inherits the parent's
+`CLAUDE_CODE_SESSION_ID` unchanged, its environment matches the parent's byte
+for byte. So all subagents of one chat see each other as `same owner`, and `ls`
+will not tell your session apart from a neighbouring agent's.
 
-Отсюда два следствия, оба обязательные:
+Two consequences follow, both mandatory:
 
-1. **Называй сессию по задаче, а не `box`** — `deploy-web`, `logs-nginx`,
-   `db-migrate`. В subagent-flow выдавай каждому агенту своё имя явно. Это
-   единственная реальная защита.
-2. Если нужна настоящая изоляция — задай владельца сам через `SSHSESS_OWNER`,
-   он переопределяет всё остальное:
+1. **Name the session after the task, not `box`** — `deploy-web`, `logs-nginx`,
+   `db-migrate`. In a subagent flow, hand every agent its own name explicitly.
+   This is the only real protection.
+2. If you need genuine isolation, set the owner yourself through
+   `SSHSESS_OWNER`; it overrides everything else:
 
 ```bash
 SSHSESS_OWNER=agent-a $S new a-deploy server.example.com
-SSHSESS_OWNER=agent-b $S ls          # увидит a-deploy как other:agent-a
+SSHSESS_OWNER=agent-b $S ls          # will see a-deploy as other:agent-a
 ```
 
-Мёртвые сессии остаются в `ls` намеренно — их лог нужен для разбора. Убрать
-записи вместе с логами: `$S prune`.
+Dead sessions stay in `ls` on purpose — their log is needed for the post-mortem.
+To drop the records along with the logs: `$S prune`.
 
-**Параллельные `run` в одну сессию сериализуются.** Remote shell выполняет одно
-за раз, поэтому два одновременных `run` раньше перемешивали вывод — A получал
-внутрь себя обёртку B. Теперь они выстраиваются в очередь на flock и получают
-каждый свой чистый вывод. Если ждать некогда, второй выйдет с кодом **125** и
-скажет, что сессия занята. `--timeout` — общий бюджет на «дождаться очереди плюс
-выполнить», так что дольше запрошенного вызов не висит.
+**Parallel `run`s into one session are serialised.** The remote shell executes
+one thing at a time, so two simultaneous `run`s used to interleave their output —
+A would receive B's wrapper inside itself. Now they queue on a flock and each
+gets its own clean output. If there is no time to wait, the second exits with
+code **125** saying the session is busy. `--timeout` is the shared budget for
+"wait for the queue plus execute", so a call never hangs longer than requested.
 
-`send` намеренно **не** берёт блокировку: `send --key C-c` должен доходить и
-тогда, когда в сессии что-то выполняется.
+`send` deliberately does **not** take the lock: `send --key C-c` has to get
+through precisely when something is running in the session.
 
-Для subagent-flow: выдавай каждому агенту своё имя сессии. Тогда они физически
-не мешают друг другу, а не полагаются на очередь.
+For a subagent flow: give every agent its own session name. Then they physically
+do not interfere with each other rather than relying on the queue.
 
-## Чтобы работа не встала
+## Keeping the work from stalling
 
-SSH-инструменты рассчитаны на человека за клавиатурой. Агента спасать некому,
-поэтому здесь два слоя: не дать промпту появиться, а если появился — ответить.
+SSH tooling is built for a human at a keyboard. Nobody is there to rescue an
+agent, so there are two layers here: prevent the prompt from appearing, and if
+it did appear, answer it.
 
-### Слой 1: гашение интерактивности (по умолчанию)
+### Layer 1: muting interactivity (on by default)
 
-`new` сразу после подключения выставляет неинтерактивное окружение и пишет
-`(non-interactive env applied)`. Отключается `--no-harden`.
+Right after connecting, `new` applies a non-interactive environment and prints
+`(non-interactive env applied)`. Disabled with `--no-harden`.
 
 ```
 PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat LESS=FRX MANPAGER=cat
 DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
 EDITOR=false VISUAL=false GIT_TERMINAL_PROMPT=0
-LC_ALL=C.UTF-8   (только если такая локаль есть — иначе юникод поедет)
+LC_ALL=C.UTF-8   (only if such a locale exists — otherwise unicode breaks)
 ```
 
-Это закрывает самую коварную ловушку — **пейджер**. Проверено: с `--no-harden`
-`run box 'git log'` уходит в таймаут 124, потому что `less` ждёт `q`; с гашением
-та же команда и `systemctl status` проходят штатно. Сюда же попадают `man`,
-`journalctl`, `git diff` — все молча ждут человека. `EDITOR=false` означает, что
-`git commit` без `-m` честно упадёт, а не подвесит сессию в `vim`.
+This closes the nastiest trap — **the pager**. Verified: with `--no-harden`,
+`run box 'git log'` runs into timeout 124 because `less` is waiting for `q`; with
+muting on, the same command and `systemctl status` go through normally. `man`,
+`journalctl` and `git diff` belong to the same family — all of them silently wait
+for a human. `EDITOR=false` means `git commit` without `-m` honestly fails
+instead of hanging the session in `vim`.
 
-### Слой 2: автоответы
+### Layer 2: auto-answers
 
-`run` следит за выводом и отвечает на известные промпты, не дожидаясь человека.
-Что отвечено — пишется в stderr, так что это видно и в логе работы.
+`run` watches the output and answers known prompts without waiting for a human.
+What was answered is written to stderr, so it is visible in the work log too.
 
 ```bash
-$S run box 'sudo apt-get install -y nginx'      # пароль подставится из файла
-$S run box --yes 'apt-get upgrade'              # + подтверждения [Y/n]
-$S run box --no-auto 'что-то деликатное'        # ничего не отвечать
+$S run box 'sudo apt-get install -y nginx'      # the password is substituted from a file
+$S run box --yes 'apt-get upgrade'              # + [Y/n] confirmations
+$S run box --no-auto 'something delicate'       # answer nothing
 ```
 
-Разделение намеренное: **пароли, пейджеры и «Press ENTER» отвечаются сразу**, а
-подтверждения, которые что-то меняют (`[Y/n]`, `Proceed?`, конфликт conffile в
-`dpkg`) — только с `--yes`. Случайный `y` не откатывается.
+The split is deliberate: **passwords, pagers and "Press ENTER" are answered
+immediately**, while confirmations that change something (`[Y/n]`, `Proceed?`, a
+`dpkg` conffile conflict) only with `--yes`. An accidental `y` does not roll
+back.
 
-Ключевое свойство, из-за которого это безопасно: правило срабатывает **только
-если совпадение стоит в самом конце вывода**, то есть программа действительно
-ждёт. Без этого условия шаблон поймал справку внутри `less` и трижды отправил
-Enter в чужой TUI — а Enter в подсвеченном пункте меню может подтвердить что
-угодно. Проверено: `echo "Do you want to continue? [Y/n]"` как обычный вывод
-не отвечается, настоящий промпт — отвечается.
+The key property that makes this safe: a rule fires **only if the match sits at
+the very end of the output**, i.e. the program really is waiting. Without that
+condition a pattern once caught the help text inside `less` and sent Enter three
+times into someone else's TUI — and Enter on a highlighted menu entry can
+confirm anything at all. Verified: `echo "Do you want to continue? [Y/n]"` as
+ordinary output is not answered, a real prompt is.
 
-### Пароли
+### Passwords
 
-В файле `~/.config/sshsess/secrets.json`, режим строго `0600` — иначе `sshsess`
-откажется работать. В чат пароль не передаётся, в командную строку не попадает.
+They live in `~/.config/sshsess/secrets.json`, mode strictly `0600` — otherwise
+`sshsess` refuses to run. The password is never passed into the chat and never
+ends up on a command line.
 
 ```bash
 mkdir -p ~/.config/sshsess
@@ -335,41 +352,41 @@ EOF
 chmod 600 ~/.config/sshsess/secrets.json
 ```
 
-Проверено: пароля нет в логе сессии — ни в тексте, ни в сырых байтах (промпты
-пароля выключают эхо терминала). В отчёте вместо значения печатается
-`<secret:sudo>`. Если нужного секрета нет, `sshsess` скажет об этом явно, а не
-зависнет.
+Verified: the password is not in the session log — neither as text nor in the
+raw bytes (password prompts turn terminal echo off). The report prints
+`<secret:sudo>` in place of the value. If the required secret is missing,
+`sshsess` says so explicitly instead of hanging.
 
-### Уже залипшая сессия и TUI
-
-```bash
-$S expect box --dry-run --once     # чего ждёт? ничего не отправляя
-$S expect box --once --yes         # ответить и разблокировать
-$S expect box --list-rules         # какие правила действуют
-```
-
-`expect` смотрит и назад по логу, поэтому ловит промпт, напечатанный **до** его
-запуска — это и есть главный сценарий. Проверено на залипшем `[Y/n]` и на
-запросе пароля.
-
-Для TUI шли клавиши напрямую. Одиночный печатный символ — тоже клавиша, и
-отправляется без Enter (`q` в `less`/`top`, `y` в диалоге):
+### An already stuck session, and TUIs
 
 ```bash
-$S send box --key Down --key Enter    # выбрать пункт меню whiptail
-$S send box --key q                   # выйти из пейджера
+$S expect box --dry-run --once     # what is it waiting for? without sending anything
+$S expect box --once --yes         # answer and unblock
+$S expect box --list-rules         # which rules are in effect
 ```
 
-Проверено на реальном `whiptail --menu`: `Down` + `Enter` выбрали второй пункт.
-Есть `F1`-`F12`, стрелки, `Home`/`End`/`PgUp`/`PgDn`, любые `C-<буква>`.
+`expect` also looks backwards through the log, so it catches a prompt printed
+**before** it was started — and that is the main scenario. Verified on a stuck
+`[Y/n]` and on a password request.
 
-Одиночная клавиша уходит без перевода строки, поэтому она остаётся висеть на
-строке ввода — но следующий `run` это не сломает: обёртка начинается с Ctrl-U,
-который сбрасывает недобитый ввод. Проверено и на оставшейся `q`, и на целой
-строке без Enter — раньше получалось `bash: q{: command not found` плюс
-`syntax error`.
+For TUIs, send keys directly. A single printable character is a key too, and is
+sent without Enter (`q` in `less`/`top`, `y` in a dialog):
 
-### Свои правила
+```bash
+$S send box --key Down --key Enter    # pick a whiptail menu entry
+$S send box --key q                   # leave the pager
+```
+
+Verified on a real `whiptail --menu`: `Down` + `Enter` selected the second entry.
+There are `F1`-`F12`, arrows, `Home`/`End`/`PgUp`/`PgDn`, and any `C-<letter>`.
+
+A single key is sent without a newline, so it stays sitting on the input line —
+but the next `run` will not break because of it: the wrapper starts with Ctrl-U,
+which discards unfinished input. Verified both with a leftover `q` and with a
+whole line without Enter — previously that produced `bash: q{: command not found`
+plus `syntax error`.
+
+### Custom rules
 
 ```json
 {
@@ -383,240 +400,247 @@ $S send box --key q                   # выйти из пейджера
 }
 ```
 
-Кладётся в `~/.config/sshsess/rules.json` или передаётся `--rules FILE`. Поля:
-`pattern` (регексп) и ровно одно из `send` / `key` / `secret`; `confirm: true`
-делает правило зависимым от `--yes`; `extend_defaults` добавляет правила к
-встроенным вместо замены.
+Goes into `~/.config/sshsess/rules.json` or is passed with `--rules FILE`.
+Fields: `pattern` (a regexp) and exactly one of `send` / `key` / `secret`;
+`confirm: true` makes the rule depend on `--yes`; `extend_defaults` adds the
+rules to the built-in ones instead of replacing them.
 
-### Слой 3: не печатать в то, что не является приглашением
+### Layer 3: do not type into something that is not a prompt
 
-Раньше `run` в запущенный `top` или `less` печатал обёртку внутрь программы как
-**нажатия клавиш** — наблюдалось, как `less` отвечал на это `Pattern not found`
-и `There is no - option`, а в `vim` так можно и файл записать. Теперь `run`
-сначала смотрит, читает ли shell команды, и при отказе говорит, что нажать.
+`run` used to print its wrapper into a running `top` or `less` as **keystrokes** —
+`less` was observed answering `Pattern not found` and `There is no - option`, and
+in `vim` you can write a file that way. Now `run` first checks whether the shell
+is reading commands, and on refusal says which key to press.
 
-Признак бесплатный — состояние bracketed paste в уже полученном логе, без
-обращения к серверу и без отправки байта. `readline` включает его (`?2004h`),
-пока shell читает строку, и гасит (`?2004l`) перед запуском любой команды.
-Замерено: bash у приглашения → `h`; `less`, `top`, `whiptail` → `l`; после
-выхода из `less` → снова `h`. Плюс отдельно ловится переключение на alternate
-screen, которым пользуется `whiptail` — тогда сообщение прямо называет
-полноэкранную программу.
+The evidence is free — the bracketed-paste state in the log already received, no
+request to the server and no byte sent. `readline` turns it on (`?2004h`) while
+the shell is reading a line, and turns it off (`?2004l`) before launching any
+command. Measured: bash at a prompt → `h`; `less`, `top`, `whiptail` → `l`; after
+leaving `less` → `h` again. On top of that, the switch to the alternate screen
+used by `whiptail` is detected separately — then the message names the
+full-screen program outright.
 
-Одна проверка накрывает сразу два случая: TUI, запущенный через `send` (там нет
-таймаута, поэтому пометка занятости не ставилась), и просто ещё не завершившуюся
-команду. Код возврата — **126**.
+One check covers two cases at once: a TUI started through `send` (there is no
+timeout there, so the busy mark was not set) and a command that simply has not
+finished. The exit code is **126**.
 
-Границы, которые стоит знать:
+Limits worth knowing:
 
-- **REPL с построчным вводом** (`python3`, `psql`) сам включает bracketed
-  paste, поэтому читается как «приглашение», и `run` в него всё-таки напечатает.
-  Это менее опасно — текст будет вычислен как выражение и выдаст ошибку, — но
-  сначала всё равно лучше выйти в shell.
-- **Shell без bracketed paste** (`dash`, `sh`, `bash --noediting`) улик не
-  оставляет: проверка честно отвечает «неизвестно» и не блокирует работу. Но и
-  не защищает: зонд включается только если стоит пометка занятости, а TUI,
-  запущенный через `send`, её не ставит. На таких shell'ах слой 3 просто не
-  работает — проверено на `bash --noediting`, обёртка ушла в `top`.
-- **Улику можно подделать**: команда, печатающая `ESC[?2004h` в свой вывод,
-  выглядит как вернувшееся приглашение. Поэтому пометку занятости снимает не
-  лог, а зонд — лог один снять её не может.
-- **Залипший alternate screen** (TUI убит SIGKILL до `rmcup`) больше не вешает
-  сессию навсегда: побеждает самая поздняя улика по позиции, поэтому
-  напечатанное после этого приглашение перебивает устаревший флаг.
-- **`truncate` при запущенном TUI отказывается** (код 126): лог — единственная
-  улика, и стереть его значит снять защиту.
-- Проверка стоит **внутри** блокировки: снаружи второй параллельный `run` видел
-  бы выполняющуюся команду первого и падал с 126 вместо того, чтобы дождаться
-  очереди.
+- **A REPL with line-by-line input** (`python3`, `psql`) turns bracketed paste on
+  itself, so it reads as "a prompt", and `run` will type into it after all. This
+  is less dangerous — the text will be evaluated as an expression and produce an
+  error — but it is still better to return to the shell first.
+- **A shell without bracketed paste** (`dash`, `sh`, `bash --noediting`) leaves no
+  evidence: the check honestly answers "unknown" and does not block the work. But
+  it does not protect either: the probe only fires if the busy mark is set, and a
+  TUI started through `send` does not set it. On such shells layer 3 simply does
+  not work — verified on `bash --noediting`, the wrapper went into `top`.
+- **The evidence can be forged**: a command printing `ESC[?2004h` into its own
+  output looks like a returned prompt. That is why the busy mark is cleared by
+  the probe, not by the log — the log alone cannot clear it.
+- **A stuck alternate screen** (a TUI killed with SIGKILL before `rmcup`) no
+  longer hangs the session forever: the latest evidence by position wins, so a
+  prompt printed after that overrides the stale flag.
+- **`truncate` refuses while a TUI is running** (code 126): the log is the only
+  evidence, and erasing it means removing the protection.
+- The check sits **inside** the lock: outside it, a second parallel `run` would
+  see the first one's command executing and fail with 126 instead of waiting its
+  turn.
 
-### Что автоматикой не решается
+### What automation does not solve
 
-- **Обычный `less` без флагов** показывает имя файла в инверсии, а не текст:
-  после снятия escape-последовательностей это неотличимо от вывода, и правило
-  его не поймает — будет 124, выход через `send --key q`. Ловятся `(END)`,
-  `--More--` и `lines N-M/T` (в том числе `less -M`, где строка заканчивается
-  процентами). Гашение делает это почти неактуальным — пейджер не запускается.
-- **`expect --list-rules`** показывает все правила, включая закрытые за `--yes`
-  — они помечены `[needs --yes]`.
-- **Промпт, на который нет секрета**, печатается отдельной строкой
-  `PROMPT NOT ANSWERED`, а не как «auto-answered»: ничего не отправлено, и
-  подсчёт ответов этим не портится.
-- **`run` в запущенный TUI больше не разрушителен — он отказывается.** См. ниже.
-- **Принятие host key** не автоматизируется намеренно — это решение о
-  безопасности, оно за человеком.
+- **A plain `less` with no flags** shows the file name in inverse video rather
+  than text: once escape sequences are stripped this is indistinguishable from
+  output, and no rule will catch it — you get 124, and the way out is
+  `send --key q`. What is caught: `(END)`, `--More--` and `lines N-M/T`
+  (including `less -M`, where the line ends with a percentage). Muting makes this
+  almost irrelevant — the pager does not start at all.
+- **`expect --list-rules`** shows all rules, including those gated behind
+  `--yes` — they are marked `[needs --yes]`.
+- **A prompt with no secret for it** is printed as a separate
+  `PROMPT NOT ANSWERED` line rather than as "auto-answered": nothing was sent,
+  and the answer count is not spoiled by it.
+- **`run` into a running TUI is no longer destructive — it refuses.** See below.
+- **Accepting a host key is deliberately not automated** — that is a security
+  decision and it belongs to a human.
 
-## Подводные камни
+## Pitfalls
 
-Всё ниже — реально воспроизведённое, а не предположения.
+Everything below was actually reproduced, not guessed at.
 
-**`exit` в `run` сносит сессию — она выполняется в том же shell'е.** Это цена
-сохранения состояния: `run` работает в логин-шелле ssh, поэтому `exit`,
-`logout` или фрагмент вида `[ -f x ] || exit 1` разлогинивают его и уносят
-сессию вместе с cwd, venv и фоновыми задачами. `run` теперь такие команды
-**отклоняет** (код 2) и предлагает варианты; проверено, что `(exit 42)` и
-`sh -c 'exit 7'` при этом честно отдают 42 и 7, а сессия жива:
-
-```bash
-$S run box '(exit 42)'          # субшелл — код 42, сессия целая
-$S run box "sh -c 'exit 7'"     # отдельный процесс — код 7
-$S run --allow-exit box 'exit'  # если закрыть сессию и есть цель
-```
-
-**`run` требует POSIX-shell у приглашения.** Механика маркеров рассчитана на
-`bash`/`zsh`/`sh` (нужны `{ ... }` и `$?`). В `fish` не сработает — `new` выйдет
-с кодом 4 и подскажет `--shell 'bash -i'`. И если в сессии запущен REPL или TUI,
-`run` просто напечатает свою обёртку внутрь этой программы — сначала выйди в
-shell.
-
-**После таймаута сессия помечается занятой, и `run` это проверяет.** Команда, не
-завершившаяся к таймауту, продолжает читать pty и съедает первую строку обёртки
-**следующей** команды — искажённый вывод и `bash: syntax error near unexpected
-token '}'`. Раньше это происходило молча.
-
-Пометка не «липкая»: `run` посылает зонд и смотрит, отвечает ли shell. Если
-команду уже добили (докормили через `send`, ответили через `expect`, она сама
-дошла) — пометка снимается автоматически и работа продолжается. Если зонд съеден
-— отказ с кодом **126** и текстом «verified: it swallowed a probe». `ls`
-показывает такую сессию как `busy`, `info` — причину.
+**`exit` inside `run` destroys the session — it runs in that same shell.** That
+is the price of keeping state: `run` works in ssh's login shell, so `exit`,
+`logout` or a fragment like `[ -f x ] || exit 1` logs it out and takes the
+session with it, along with cwd, venv and background jobs. `run` now **rejects**
+such commands (code 2) and offers alternatives; verified that `(exit 42)` and
+`sh -c 'exit 7'` still honestly return 42 and 7 with the session alive:
 
 ```bash
-$S read box --tail 20     # посмотреть, что висит
-$S interrupt box          # Ctrl-C + проверка, что shell вернулся
-$S send box --key q       # если это полноэкранная программа — её же клавиша
+$S run box '(exit 42)'          # subshell — code 42, session intact
+$S run box "sh -c 'exit 7'"     # separate process — code 7
+$S run --allow-exit box 'exit'  # if closing the session is the actual goal
 ```
 
-`interrupt` **не рапортует успех вслепую**: `less`, `top` и прочие игнорируют
-SIGINT, поэтому после Ctrl-C он зондирует shell и при неудаче выходит с 126,
-подсказывая послать родную клавишу выхода. Раньше он снимал пометку, и следующий
-`run` печатал обёртку внутрь `less` как нажатия клавиш.
+**`run` requires a POSIX shell at the prompt.** The marker mechanics rely on
+`bash`/`zsh`/`sh` (`{ ... }` and `$?` are needed). It will not work in `fish` —
+`new` exits with code 4 and suggests `--shell 'bash -i'`. And if a REPL or a TUI
+is running in the session, `run` will simply print its wrapper inside that
+program — return to the shell first.
 
-`run --force` обходит проверку, но осторожно: если команда действительно висит,
-`--force` **не** вернёт её код — он досидит весь `--timeout` и отдаст 124 с
-сырым транскриптом. По умолчанию это 120 секунд тишины, так что задавай короткий
-`--timeout` явно. Автоответы при `--force` в занятой сессии отключаются: иначе
-правила совпадают с текстом, нарисованным TUI, и начинают жать клавиши внутри
-него (три Enter в живой `less` — наблюдалось).
+**After a timeout the session is marked busy, and `run` checks that.** A command
+that did not finish by the timeout keeps reading the pty and eats the first line
+of the **next** command's wrapper — garbled output and
+`bash: syntax error near unexpected token '}'`. Previously this happened
+silently.
 
-**`send --key C-c` прерывает удалённую команду, но не разблокирует ждущий
-`run`.** Ctrl-C рвёт всю группу `{ ... }`, поэтому закрывающий маркер не
-выполняется: `run` досидит до своего таймаута и всё это время держит блокировку,
-выдавая другим ложную «busy», хотя shell уже свободен. Для этого есть отдельная
-команда — она делает и то, и другое:
+The mark is not "sticky": `run` sends a probe and sees whether the shell answers.
+If the command has already been dealt with (fed through `send`, answered through
+`expect`, or finished on its own), the mark is cleared automatically and work
+continues. If the probe is swallowed — refusal with code **126** and the text
+"verified: it swallowed a probe". `ls` shows such a session as `busy`, `info`
+shows the reason.
 
 ```bash
-$S interrupt box     # run немедленно вернётся с кодом 130, блокировка снята
+$S read box --tail 20     # look at what is hanging
+$S interrupt box          # Ctrl-C plus a check that the shell came back
+$S send box --key q       # if it is a full-screen program — its own key
 ```
 
-**Команда, читающая stdin, съедает маркер — и маркер следующей команды тоже.**
-`run box 'read x'` уходит в таймаут (код 124), а следующий `run` получает
-искажённый вывод вроде `got=[{ printf '__SSB...']` и `syntax error near
-unexpected token '}'`. Сессия после этого сама восстанавливается, но лечить
-надо так:
+`interrupt` does **not** report success blindly: `less`, `top` and others ignore
+SIGINT, so after Ctrl-C it probes the shell and on failure exits with 126,
+suggesting you send the program's native exit key. Previously it cleared the
+mark, and the next `run` printed the wrapper into `less` as keystrokes.
+
+`run --force` bypasses the check, but carefully: if the command really is
+hanging, `--force` will **not** return its code — it will sit out the whole
+`--timeout` and give back 124 with a raw transcript. The default is 120 seconds
+of silence, so set a short `--timeout` explicitly. Auto-answers are disabled with
+`--force` in a busy session: otherwise the rules match text drawn by the TUI and
+start pressing keys inside it (three Enters into a live `less` — observed).
+
+**`send --key C-c` interrupts the remote command but does not unblock a waiting
+`run`.** Ctrl-C tears down the whole `{ ... }` group, so the closing marker is
+never executed: `run` sits out its timeout and holds the lock all that time,
+giving others a false "busy" although the shell is already free. There is a
+separate command for this that does both:
 
 ```bash
-$S run box 'read x < /dev/null; echo "rc=$?"'      # перекрыть stdin
-$S run box 'echo hello | { read x; echo "[$x]"; }' # или скормить данные
+$S interrupt box     # run returns immediately with code 130, the lock is released
 ```
 
-**`wait` видит эхо того, что ты только что отправил.** Shell отражает ввод
-обратно, поэтому `send box 'sleep 3; echo TRAP_WORD'` + `wait box 'TRAP_WORD'`
-срабатывает мгновенно, а не через 3 s. Поэтому `wait` по умолчанию смотрит
-**только новый** вывод (`--from-start` вернёт старое поведение), и всё равно:
-если нужно дождаться завершения команды — это работа `run --timeout`, а не
-`wait`. `wait` хорош для строки в логе уже работающего процесса.
+**A command that reads stdin eats the marker — and the next command's marker
+too.** `run box 'read x'` runs into a timeout (code 124), and the next `run` gets
+garbled output like `got=[{ printf '__SSB...']` and
+`syntax error near unexpected token '}'`. The session recovers on its own
+afterwards, but the cure is this:
 
-**Полноэкранные TUI читаются приблизительно.** `read` — это построчная история,
-а не снимок экрана: escape-последовательности позиционирования курсора
-вычищаются, поэтому кадры `top` накладываются друг на друга, и шапка может
-оказаться приклеенной к строке предыдущего кадра. Для данных используй пакетные
-режимы (`top -b -n1`, `journalctl --no-pager`), а `read` — для того, что и так
-льётся построчно: логи, сборки, REPL.
+```bash
+$S run box 'read x < /dev/null; echo "rc=$?"'      # close off stdin
+$S run box 'echo hello | { read x; echo "[$x]"; }' # or feed it data
+```
 
-**Одна команда за раз, но ждать `run` будет не всегда.** Различай два случая:
+**`wait` sees the echo of what you have just sent.** The shell echoes input back,
+so `send box 'sleep 3; echo TRAP_WORD'` + `wait box 'TRAP_WORD'` fires instantly
+rather than after 3 s. That is why `wait` looks at **new** output only by default
+(`--from-start` restores the old behaviour) — and even so: if you need to wait for
+a command to finish, that is `run --timeout`'s job, not `wait`'s. `wait` is good
+for a line in the log of an already running process.
 
-- команду держит **параллельный `run`** — второй встанет в очередь на flock и
-  выполнится после первого (проверено: два `run` по 5 s заняли 10.4 s);
-- команду запустили через **`send`** — тогда `run` не ждёт, а сразу отказывается
-  с кодом 126 за ~0.05 s, потому что видит, что shell не у приглашения.
+**Full-screen TUIs are read approximately.** `read` is a line-by-line history,
+not a screen snapshot: cursor-positioning escape sequences are stripped, so
+`top`'s frames overlay each other and the header can end up glued to a line from
+the previous frame. For data, use batch modes (`top -b -n1`,
+`journalctl --no-pager`), and keep `read` for what streams line by line anyway:
+logs, builds, REPLs.
 
-Параллелить по-настоящему — отдельные сессии, см. раздел выше.
+**One command at a time, but `run` will not always wait.** Distinguish two cases:
 
-**Неизвестный host key вешает подключение.** `new` выйдет с кодом 4, покажет
-хвост вывода с вопросом про fingerprint и подскажет команду. Принятие ключа
-пишет в `~/.ssh/known_hosts` — это изменение конфигурации, так что спроси
-пользователя, прежде чем отвечать `yes`:
+- the command is held by a **parallel `run`** — the second one queues on the
+  flock and executes after the first (verified: two 5 s `run`s took 10.4 s);
+- the command was started through **`send`** — then `run` does not wait but
+  refuses immediately with code 126 in ~0.05 s, because it sees the shell is not
+  at a prompt.
+
+For real parallelism, use separate sessions — see the section above.
+
+**An unknown host key hangs the connection.** `new` exits with code 4, shows the
+tail of the output with the fingerprint question, and suggests the command.
+Accepting the key writes to `~/.ssh/known_hosts` — that is a configuration
+change, so ask the user before answering `yes`:
 
 ```bash
 $S send box yes
 ```
 
-**Сессии не переживают перезагрузку.** Состояние лежит в каталоге из раздела
-«Требования» — на Linux это `/run/user/<uid>/sshsess/`, на macOS `$TMPDIR`.
-Оба чистятся системой. Переопределяется через `SSHSESS_DIR`.
+**Sessions do not survive a reboot.** State lives in the directory from the
+"Requirements" section — on Linux that is `/run/user/<uid>/sshsess/`, on macOS
+`$TMPDIR`. The system cleans both. Override with `SSHSESS_DIR`.
 
-Сессии, созданные до перехода на `$TMPDIR`, лежали в `~/.cache/sshsess` и в
-списке больше не появятся. Специально мигрировать нечего — сессия это живое
-ssh-соединение с процессом-демоном, после перезагрузки она мертва в любом
-случае. Но если старый каталог непуст, `ls` про него скажет и подскажет
-команду для просмотра.
-`out.log` не ротируется — TUI на несколько минут раздувает его на мегабайты.
-Чистится без разрыва соединения: `truncate NAME` (откажется, если прямо сейчас
-выполняется команда, потому что та считает вывод по смещениям в файле).
+Sessions created before the move to `$TMPDIR` lived in `~/.cache/sshsess` and no
+longer appear in the listing. There is nothing to migrate deliberately — a
+session is a live ssh connection with a daemon process, and after a reboot it is
+dead in any case. But if the old directory is not empty, `ls` mentions it and
+suggests the command to look inside.
+`out.log` is not rotated — a TUI running for a few minutes inflates it to
+megabytes. It is cleared without dropping the connection: `truncate NAME` (which
+refuses if a command is executing right now, because that command counts output
+by offsets in the file).
 
-**Разрыв сети.** Стоят `ServerAliveInterval=15` / `ServerAliveCountMax=4`, так
-что мёртвое соединение обнаружится примерно за минуту, сессия станет `dead`.
-Автопереподключения нет, но переоткрывать вручную с теми же аргументами не
-нужно: `reconnect NAME` берёт цель, ssh-аргументы, `--shell` и размер pty из
-`meta.json`. Проверено на убитом ssh-процессе. Удалённое состояние при этом
-теряется по-настоящему — новый shell, новый cwd, переменных нет, и `reconnect`
-об этом прямо пишет.
+**Network drops.** `ServerAliveInterval=15` / `ServerAliveCountMax=4` are set, so
+a dead connection is detected in about a minute and the session goes `dead`.
+There is no auto-reconnect, but you do not need to reopen it by hand with the
+same arguments: `reconnect NAME` takes the target, the ssh arguments, `--shell`
+and the pty size from `meta.json`. Verified on a killed ssh process. The remote
+state is genuinely lost in the process — a new shell, a new cwd, no variables —
+and `reconnect` says so outright.
 
-## Диагностика
+## Diagnostics
 
-| Симптом | Что значит и что делать |
+| Symptom | What it means and what to do |
 |---|---|
-| `session 'x' is not running (no live socket ...)`, код 3 | Сессии нет или она умерла. `ls` покажет статус, `new` откроет заново. |
-| `could not be opened` + хвост вывода ssh, код 3 | ssh упал сразу. В сообщении есть полная строка запуска и вывод ssh — читай его: `unknown option`, `No address associated with hostname`, `Connection refused`. |
-| `started but the remote shell did not respond`, код 4 | Соединение висит на вводе — host key или пароль. Хвост вывода в сообщении, отвечай через `send`. |
-| `command still running after Ns`, код 124 | Команда не завершилась. Вывод выше — частичный. Разбирайся через `read`, прерывай `interrupt`. |
-| `session 'x' is busy`, код 125 | Параллельный `run` держит блокировку. Дай больший `--timeout` или работай через отдельную сессию. |
-| `still has a command running`, код 126 | Проверено зондом: предыдущая команда съедает ввод. `interrupt`, либо родная клавиша выхода программы. |
-| `sent Ctrl-C … still not reading`, код 126 | Программа игнорирует SIGINT (`less`, `top`). Пошли её клавишу выхода: `send NAME --key q`. |
-| `refusing to run … not at a prompt`, код 126 | В сессии что-то выполняется или открыт TUI. `read --tail 20`, затем `interrupt` либо родная клавиша выхода. |
-| `refusing to run … full-screen program`, код 126 | Полноэкранная программа (`whiptail`, `dialog`). Выход её клавишей — обычно `Enter` или `q`. |
-| `died while running the command`, код 3 | Соединение оборвалось посреди команды; в сообщении хвост лога. |
-| Вывод содержит `__SSB...` / `syntax error near '}'` | Маркер съела программа, читающая stdin. См. подводные камни. |
-| `refusing to run this: 'exit' would log out...`, код 2 | Команда закрыла бы сессию. Оберни в `( ... )` или `sh -c`. |
-| `session 'x' is already running`, код 2 | Имя занято живой сессией. Возьми другое — оно может принадлежать соседнему агенту. |
+| `session 'x' is not running (no live socket ...)`, code 3 | There is no such session, or it died. `ls` shows the status, `new` opens it again. |
+| `could not be opened` + a tail of ssh output, code 3 | ssh failed immediately. The message contains the full launch line and ssh's output — read it: `unknown option`, `No address associated with hostname`, `Connection refused`. |
+| `started but the remote shell did not respond`, code 4 | The connection is waiting on input — a host key or a password. The output tail is in the message; answer through `send`. |
+| `command still running after Ns`, code 124 | The command did not finish. The output above is partial. Investigate with `read`, interrupt with `interrupt`. |
+| `session 'x' is busy`, code 125 | A parallel `run` holds the lock. Give a bigger `--timeout` or work through a separate session. |
+| `still has a command running`, code 126 | Verified by probe: the previous command is eating input. `interrupt`, or the program's native exit key. |
+| `sent Ctrl-C … still not reading`, code 126 | The program ignores SIGINT (`less`, `top`). Send its exit key: `send NAME --key q`. |
+| `refusing to run … not at a prompt`, code 126 | Something is executing in the session, or a TUI is open. `read --tail 20`, then `interrupt` or the native exit key. |
+| `refusing to run … full-screen program`, code 126 | A full-screen program (`whiptail`, `dialog`). Leave it with its key — usually `Enter` or `q`. |
+| `died while running the command`, code 3 | The connection dropped mid-command; the message carries the log tail. |
+| Output contains `__SSB...` / `syntax error near '}'` | A program reading stdin ate the marker. See the pitfalls. |
+| `refusing to run this: 'exit' would log out...`, code 2 | The command would close the session. Wrap it in `( ... )` or `sh -c`. |
+| `session 'x' is already running`, code 2 | The name is held by a live session. Take another one — it may belong to a neighbouring agent. |
 
-Коды возврата: `0`/код удалённой команды, `2` — ошибка аргументов (и отказ
-guard'а на `exit`), `3` — сессия мертва или её нет, `4` — подключились, но shell
-не отвечает, `124` — таймаут, `125` — блокировку держит параллельный `run`,
-`126` — в сессии висит незавершённая команда, `130` — прервано через `interrupt`.
+Exit codes: `0`/the remote command's code, `2` — argument error (and the `exit`
+guard's refusal), `3` — the session is dead or absent, `4` — connected but the
+shell does not answer, `124` — timeout, `125` — the lock is held by a parallel
+`run`, `126` — an unfinished command is hanging in the session, `130` —
+interrupted through `interrupt`.
 
-Если что-то совсем странное — сырой поток без чистки и лог самого демона:
+If something is truly strange, look at the raw stream without filtering and at
+the daemon's own log:
 
 ```bash
 $S read box --raw | tail -c 2000
 cat /run/user/1000/sshsess/box/daemon.log
 ```
 
-## Как это устроено
+## How it works
 
-Демон — дважды форкнутый процесс, владеет pty-мастером и дописывает всё, что
-пришло с сервера, в `out.log`. Клиенты читают этот файл напрямую, поэтому `read`
-работает даже пока команда ещё льёт вывод. Через unix-сокет ходят только
-операции с побочным эффектом: `send` / `info` / `kill`.
+The daemon is a double-forked process that owns the pty master and appends
+everything coming from the server to `out.log`. Clients read that file directly,
+so `read` works even while a command is still streaming output. Only
+side-effecting operations go through the unix socket: `send` / `info` / `kill`.
 
-`run` устроен на двух хитростях, и обе обязательны:
+`run` rests on two tricks, and both are mandatory:
 
-1. Литералы маркеров разорваны кавычками (`'__SS''B...'`), поэтому **эхо**
-   отправленной строки не содержит того текста, который мы ищем. Иначе поиск
-   всегда попадал бы в эхо и резал вывод не там.
-2. Всё завёрнуто в одну группу `{ ... }`. Shell не начнёт выполнение, пока не
-   дочитает закрывающую скобку, поэтому всё эхо (включая строки продолжения
-   `>`) оказывается **до** вывода первого маркера — то есть вне вырезаемой
-   области. Команда при этом стоит на отдельной физической строке: `foo & ;
-   printf` — синтаксическая ошибка, а `foo &` + перевод строки — нет, поэтому
-   `run box 'sleep 30 &'` работает.
+1. The marker literals are split by quotes (`'__SS''B...'`), so the **echo** of
+   the line we send does not contain the text we are searching for. Otherwise the
+   search would always hit the echo and cut the output in the wrong place.
+2. Everything is wrapped in a single `{ ... }` group. The shell will not start
+   executing until it has read the closing brace, so all the echo (including the
+   `>` continuation lines) ends up **before** the first marker's output — that is,
+   outside the region being cut. The command sits on its own physical line for
+   this: `foo & ; printf` is a syntax error, while `foo &` plus a newline is not,
+   which is why `run box 'sleep 30 &'` works.
