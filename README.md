@@ -1,116 +1,122 @@
+**English** | [Русский](README.ru.md)
+
 # ssh-session
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](skills/ssh-session/scripts/sshsess.py)
 [![stdlib only](https://img.shields.io/badge/deps-stdlib%20only-green)](skills/ssh-session/scripts/sshsess.py)
-[![Linux · macOS](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS-lightgrey)](#ограничения)
+[![Linux · macOS](https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS-lightgrey)](#limitations)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Скилл для агентных харнесов (**Claude Code** в первую очередь), который держит
-живую SSH-сессию к серверу и гоняет по ней команды. Одно соединение, один
-удалённый shell на всё время работы: `cd`, `export`, активированный venv и
-фоновые задачи сохраняются между вызовами.
+A skill for agentic harnesses (**Claude Code** first and foremost) that keeps a
+live SSH session to a server and runs commands over it. One connection, one
+remote shell for the whole job: `cd`, `export`, an activated venv and background
+jobs all survive between calls.
 
-Обычный `ssh host "cmd"` платит полный хендшейк за каждую команду и каждый раз
-стартует **новый** shell — поэтому агент, которому нужно сделать на сервере
-десять шагов подряд, теряет состояние после каждого и переклеивает его
-однострочниками вида `cd /srv/app && source venv/bin/activate && …`.
+A plain `ssh host "cmd"` pays a full handshake per command and starts a **new**
+shell every time — so an agent that needs ten steps on a server loses its state
+after each one and keeps gluing it back together with one-liners like
+`cd /srv/app && source venv/bin/activate && …`.
 
-Замерено на реальном хосте: 10 команд через новый ssh каждый раз — **25.2 s**,
-через живую сессию — **3.5 s**.
+Measured on a real host: 10 commands over a fresh ssh each time — **25.2 s**,
+over a live session — **3.5 s**.
 
-## Зачем это агенту, а не человеку
+## Why an agent needs this and a human doesn't
 
-У человека за клавиатурой уже есть живая сессия — терминал. Проблема в том, что
-SSH-инструменты рассчитаны на него: если вылез `[Y/n]`, запрос пароля или
-пейджер — человек нажмёт клавишу. Агента спасать некому, и типовой финал такой
-работы — команда, висящая в `less` до таймаута, или, хуже, обёртка,
-напечатанная **внутрь** запущенного `top` как нажатия клавиш.
+A human at a keyboard already has a live session — the terminal. The problem is
+that SSH tooling is built for that human: when a `[Y/n]`, a password prompt or a
+pager shows up, they press a key. Nobody is there to rescue an agent, and the
+typical ending is a command hanging inside `less` until the timeout — or worse,
+a wrapper typed **into** a running `top` as keystrokes.
 
-Поэтому здесь не только «сессия живёт», но и три слоя защиты от того, чтобы
-работа встала:
+So this is not just "the session stays alive". There are three layers keeping
+the work from stalling:
 
-1. **Гашение интерактивности.** Сразу после подключения выставляется
-   неинтерактивное окружение (`PAGER=cat`, `DEBIAN_FRONTEND=noninteractive`,
-   `EDITOR=false`, …). Это закрывает самую коварную ловушку — пейджер:
-   с `--no-harden` `git log` уходит в таймаут, потому что `less` ждёт `q`.
-2. **Автоответы.** Пароли, пейджеры и «Press ENTER» отвечаются сразу;
-   подтверждения, которые что-то меняют (`[Y/n]`, конфликт conffile в `dpkg`) —
-   только с явным `--yes`. Правило срабатывает, **только если совпадение стоит
-   в самом конце вывода**, то есть программа действительно ждёт: `echo "Do you
-   want to continue? [Y/n]"` как обычный вывод не отвечается.
-3. **Отказ печатать в то, что не является приглашением.** Перед отправкой
-   проверяется состояние bracketed paste в уже полученном логе — бесплатно, без
-   обращения к серверу. Если в сессии открыт TUI или висит незавершённая
-   команда, `run` выходит с кодом 126 и говорит, какую клавишу нажать, вместо
-   того чтобы вслепую надиктовать текст в `vim`.
+1. **Muting interactivity.** Right after connecting, a non-interactive
+   environment is applied (`PAGER=cat`, `DEBIAN_FRONTEND=noninteractive`,
+   `EDITOR=false`, …). This closes the nastiest trap — the pager: with
+   `--no-harden`, `git log` runs into the timeout because `less` is waiting
+   for `q`.
+2. **Auto-answers.** Passwords, pagers and "Press ENTER" are answered
+   immediately; confirmations that actually change something (`[Y/n]`, a `dpkg`
+   conffile conflict) only with an explicit `--yes`. A rule fires **only if the
+   match sits at the very end of the output**, i.e. the program really is
+   waiting: `echo "Do you want to continue? [Y/n]"` as ordinary output is not
+   answered.
+3. **Refusing to type into something that is not a prompt.** Before sending,
+   the bracketed-paste state in the log already received is inspected — for
+   free, without touching the server. If a TUI is open in the session, or a
+   command is still running, `run` exits with code 126 and tells you which key
+   to press instead of blindly dictating text into `vim`.
 
-Плюс отдельно: коды возврата у всех отказов разные (`124` таймаут, `125` занято
-параллельным `run`, `126` не у приглашения, `130` прервано) — агент отличает
-«медленно» от «сломано» без разбора текста.
+On top of that: every refusal has its own exit code (`124` timeout, `125` busy
+with a parallel `run`, `126` not at a prompt, `130` interrupted) — an agent can
+tell "slow" from "broken" without parsing prose.
 
-## Установка
+## Installation
 
-Скилл — это папка `skills/ssh-session/` с `SKILL.md` по
-[спецификации Agent Skills](https://agentskills.io); внутри только Python-скрипт
-на stdlib, так что установка сводится к копированию. Репозиторий заодно оформлен
-как маркетплейс плагинов Claude Code — для него есть способ покороче.
+The skill is the `skills/ssh-session/` directory with a `SKILL.md` following the
+[Agent Skills specification](https://agentskills.io); inside it there is only a
+stdlib Python script, so installing it amounts to copying a folder. The
+repository doubles as a Claude Code plugin marketplace, which gives it a
+shorter path.
 
-**Claude Code, плагином** (с версионированием и `/plugin update`):
+**Claude Code, as a plugin** (versioned, with `/plugin update`):
 
 ```
 /plugin marketplace add Flexlug/ssh-session
 /plugin install ssh-session@flexlug
 ```
 
-**Вручную, в любой харнес** — склонировать и положить папку скилла куда надо:
+**By hand, into any harness** — clone and drop the skill folder where it belongs:
 
 ```bash
 git clone https://github.com/Flexlug/ssh-session /tmp/ssh-session
 cp -r /tmp/ssh-session/skills/ssh-session ~/.claude/skills/
 ```
 
-| Харнес | Куда класть |
+| Harness | Where it goes |
 |---|---|
-| Claude Code, Claude Desktop | `~/.claude/skills/` (или `.claude/skills/` в проекте) |
+| Claude Code, Claude Desktop | `~/.claude/skills/` (or `.claude/skills/` in a project) |
 | Codex CLI | `~/.codex/skills/` |
 | Gemini CLI | `~/.gemini/skills/` |
-| GitHub Copilot / VS Code | `~/.config/skills/` (или `.github/skills/` в репозитории) |
-| Cursor, OpenCode, Goose, Amp | см. документацию клиента — все читают `SKILL.md` |
+| GitHub Copilot / VS Code | `~/.config/skills/` (or `.github/skills/` in a repository) |
+| Cursor, OpenCode, Goose, Amp | see the client's docs — they all read `SKILL.md` |
 
-Есть ещё универсальный `gh skill install Flexlug/ssh-session` (GitHub CLI 2.90+),
-но им я не пользовался — работоспособность на этом репозитории не проверял.
+There is also the universal `gh skill install Flexlug/ssh-session` (GitHub CLI
+2.90+), but I have not used it — I have not verified that it works against this
+repository.
 
-Проверка, что драйвер жив (он работает и сам по себе, без всякого агента):
+Check the driver is alive (it runs perfectly well on its own, without any agent):
 
 ```bash
 ~/.claude/skills/ssh-session/scripts/sshsess.py ls
 # no sessions
 ```
 
-## Требования
+## Requirements
 
-`python3` (3.8+) и `ssh` — больше ничего. Ни pip-пакетов, ни tmux, ни Node.
+`python3` (3.8+) and `ssh` — nothing else. No pip packages, no tmux, no Node.
 
-Со стороны сервера зависимость не от дистрибутива, а от shell:
+On the server side the dependency is not the distribution but the shell:
 
-| Нужно для | Требование | Где не работает |
+| Needed for | Requirement | Where it breaks |
 |---|---|---|
-| `run` (маркеры, `$?`) | любой POSIX-shell | `fish`, `csh` → лечится `--shell 'bash -i'` |
-| слой 3 (занятость) | bracketed paste, т.е. readline/zle | `dash`, `ash`/busybox → проверка отвечает «неизвестно» и не защищает |
+| `run` (markers, `$?`) | any POSIX shell | `fish`, `csh` → fixed by `--shell 'bash -i'` |
+| layer 3 (busy check) | bracketed paste, i.e. readline/zle | `dash`, `ash`/busybox → the check answers "unknown" and does not protect |
 
-## Быстрый старт
+## Quick start
 
 ```bash
-S=~/.claude/skills/ssh-session/scripts/sshsess.py   # при установке плагином путь другой
+S=~/.claude/skills/ssh-session/scripts/sshsess.py   # a plugin install puts it elsewhere
 
-$S new box myhost.example.com    # открыть сессию с именем box
-$S run box uname -sr             # выполнить, получить вывод и код возврата
-$S read box --tail 40            # посмотреть, что там происходит
-$S send box --key C-c            # отправить сырой ввод
-$S kill box                      # закрыть
+$S new box myhost.example.com    # open a session named box
+$S run box uname -sr             # run it, get the output and the exit code
+$S read box --tail 40            # look at what is going on in there
+$S send box --key C-c            # send raw input
+$S kill box                      # close it
 ```
 
-Состояние сохраняется — в этом весь смысл:
+State persists — that is the entire point:
 
 ```bash
 $S run box 'cd /etc && export MYVAR=hello'
@@ -119,26 +125,26 @@ $S run box 'pwd; echo "MYVAR=$MYVAR"'
 # MYVAR=hello
 ```
 
-`run` возвращает **чистый** вывод (без приглашения и эха) и **настоящий** код
-возврата удалённой команды:
+`run` returns **clean** output (no prompt, no echo) and the **real** exit code
+of the remote command:
 
 ```bash
-$S run box 'ls /nope'; echo "код=$?"
+$S run box 'ls /nope'; echo "rc=$?"
 # ls: cannot access '/nope': No such file or directory
-# код=2
+# rc=2
 ```
 
-Сессия живёт независимо от процесса, который её создал: между вызовами можно
-делать что угодно, она останется на месте.
+A session outlives the process that created it: do whatever you like between
+calls, it stays where it was.
 
-## Команды
+## Commands
 
 ```bash
-# --- сессии ---
+# --- sessions ---
 $S new NAME TARGET [--timeout 40] [--shell 'bash -i'] [--force] [--no-harden] [-- SSH_ARGS...]
 $S ls | info NAME | reconnect NAME | truncate NAME | kill NAME|--all | prune
 
-# --- выполнение ---
+# --- execution ---
 $S run [--timeout 120] [--yes] [--no-auto] [--force] [--allow-exit] NAME CMD...
 $S expect NAME [--once] [--yes] [--dry-run] [--list-rules]
 $S send NAME [TEXT] [--key KEY] [--no-enter] [--paste] [--wait SEC]
@@ -147,26 +153,27 @@ $S read NAME [--tail N] [--all] [--since OFFSET] [--raw] [--no-filter]
 $S wait NAME REGEX [--timeout 60] [--from-start]
 ```
 
-Что чем делать:
+What to use for what:
 
-| Задача | Инструмент |
+| Task | Tool |
 |---|---|
-| Выполнить команду, получить вывод и код возврата | `run` — почти всегда он |
-| Ответить на промпт (sudo, host key, `yes/no`) | `send` |
-| Работать в REPL (`python3`, `psql`, `mysql`) | `send` + `read` |
-| Разблокировать залипшую сессию | `expect`, `interrupt` |
-| Дождаться строки в выводе уже запущенного процесса | `wait` |
+| Run a command, get output and an exit code | `run` — almost always this one |
+| Answer a prompt (sudo, host key, `yes/no`) | `send` |
+| Work in a REPL (`python3`, `psql`, `mysql`) | `send` + `read` |
+| Unstick a session that is stuck | `expect`, `interrupt` |
+| Wait for a line in the output of an already running process | `wait` |
 
-Поддерживаются REPL (`--paste` для многострочного ввода — обходит автоотступы
-PyREPL), TUI через клавиши (`send --key Down --key Enter` выбирает пункт
-whiptail-меню), несколько параллельных сессий, в том числе к одному хосту.
+REPLs are supported (`--paste` for multi-line input — it sidesteps PyREPL's
+auto-indent), TUIs through keys (`send --key Down --key Enter` picks an entry in
+a whiptail menu), and any number of parallel sessions, including several to the
+same host.
 
-## Пароли
+## Passwords
 
-В файле `~/.config/sshsess/secrets.json`, режим строго `0600` — иначе `sshsess`
-откажется работать. В чат пароль не передаётся, в командную строку не попадает,
-в лог сессии не пишется (промпты пароля выключают эхо терминала); в отчёте
-вместо значения печатается `<secret:sudo>`.
+They live in `~/.config/sshsess/secrets.json`, mode strictly `0600` — otherwise
+`sshsess` refuses to run. The password is never passed into the chat, never ends
+up on a command line, and is not written to the session log (password prompts
+turn terminal echo off); the report prints `<secret:sudo>` in place of the value.
 
 ```bash
 mkdir -p ~/.config/sshsess
@@ -174,75 +181,78 @@ printf '%s\n' '{"secrets": {"sudo": "…"}}' > ~/.config/sshsess/secrets.json
 chmod 600 ~/.config/sshsess/secrets.json
 ```
 
-Свои правила автоответа — `~/.config/sshsess/rules.json` (регексп + один из
-`send` / `key` / `secret`, флаг `confirm` привязывает правило к `--yes`).
+Custom auto-answer rules go into `~/.config/sshsess/rules.json` (a regexp plus
+exactly one of `send` / `key` / `secret`; the `confirm` flag ties a rule to
+`--yes`).
 
-**Принятие host key не автоматизируется намеренно** — это решение о
-безопасности, оно за человеком: `new` выйдет с кодом 4 и покажет fingerprint.
+**Accepting a host key is deliberately not automated** — that is a security
+decision and it belongs to a human: `new` exits with code 4 and shows the
+fingerprint.
 
-## Ограничения
+## Limitations
 
-- **Windows не поддерживается**, и это решение, а не незакрытый долг: там нет ни
-  pty, ни `fork()`, а ConPTY потребовал бы стороннюю зависимость вроде
-  `pywinpty` и сломал бы главное свойство — только stdlib, ставить нечего.
-  Скрипт выходит с кодом 1 и понятным сообщением. Для Windows есть WSL — внутри
-  него это обычный Linux и всё работает как есть.
-- **Сессии не переживают перезагрузку.** Состояние лежит в
-  `$XDG_RUNTIME_DIR/sshsess` (Linux) или `$TMPDIR` (macOS) — оба чистятся
-  системой. Переопределяется через `SSHSESS_DIR`.
-- **Автопереподключения нет.** Разрыв обнаруживается примерно за минуту
-  (`ServerAliveInterval=15`), сессия становится `dead`; `reconnect NAME`
-  переоткрывает её с теми же аргументами, но удалённое состояние при этом
-  теряется по-настоящему — и `reconnect` об этом прямо пишет.
-- **Имя сессии — общий ресурс машины.** Кто угодно с тем же именем попадёт в тот
-  же shell; `ls`/`info` показывают владельца, `new` на занятое живое имя
-  отказывается. Настоящая изоляция — через `SSHSESS_OWNER`.
-- **Полноэкранные TUI читаются приблизительно**: `read` — это построчная
-  история, а не снимок экрана. Для данных используй пакетные режимы
-  (`top -b -n1`, `journalctl --no-pager`).
+- **Windows is not supported**, and that is a decision rather than an open debt:
+  there is no pty and no `fork()` there, and ConPTY would require a third-party
+  dependency such as `pywinpty`, breaking the main property — stdlib only,
+  nothing to install. The script exits with code 1 and a clear message. WSL
+  covers Windows: inside it this is ordinary Linux and everything works as is.
+- **Sessions do not survive a reboot.** State lives in `$XDG_RUNTIME_DIR/sshsess`
+  (Linux) or `$TMPDIR` (macOS) — the system wipes both. Override with
+  `SSHSESS_DIR`.
+- **There is no auto-reconnect.** A dropped link is detected in about a minute
+  (`ServerAliveInterval=15`) and the session goes `dead`; `reconnect NAME`
+  reopens it with the same arguments, but the remote state is genuinely gone —
+  and `reconnect` says so outright.
+- **A session name is a machine-wide resource.** Anyone using the same name lands
+  in the same shell; `ls`/`info` show the owner, and `new` refuses a name held by
+  a live session. Real isolation comes from `SSHSESS_OWNER`.
+- **Full-screen TUIs read approximately**: `read` is a line-by-line history, not
+  a screen snapshot. For data, use batch modes (`top -b -n1`,
+  `journalctl --no-pager`).
 
-Клиентская часть проверена на Linux; macOS не тестировался, но специфичные для
-него места закрыты явно — выбор каталога состояния, права `0700`/`0600` и лимит
-длины пути AF_UNIX (104 байта против 108 на Linux; проверено на эмуляции той же
-длины: 104 отказывает внятным сообщением, а не «daemon failed to start»).
+The client side is tested on Linux; macOS is untested, but the parts specific to
+it are covered explicitly — the choice of state directory, `0700`/`0600` modes,
+and the AF_UNIX path length limit (104 bytes there against 108 on Linux; checked
+on an emulation of the same length: 104 fails with a clear message rather than
+"daemon failed to start").
 
-## Тесты
+## Tests
 
-Стенд не требует ни одного удалённого хоста: `tests/local-sshd.sh` поднимает
-временный `sshd` на 127.0.0.1 — без sudo, без системных изменений, `~/.ssh` не
-трогается, всё живёт в одном рабочем каталоге и удаляется вместе с ним.
+The test stand needs no remote host at all: `tests/local-sshd.sh` brings up a
+temporary `sshd` on 127.0.0.1 — no sudo, no system-wide changes, `~/.ssh` is
+never touched, everything lives in one work directory and is deleted with it.
 
 ```bash
 cd skills/ssh-session
-bash tests/local-sshd.sh start     # печатает цель для подключения
-bash tests/local-sshd.sh stop      # убивает и удаляет рабочий каталог
+bash tests/local-sshd.sh start     # prints the target to connect to
+bash tests/local-sshd.sh stop      # kills it and removes the work directory
 ```
 
-Смоук-набор — в [`tests/TESTCASES.md`](skills/ssh-session/tests/TESTCASES.md).
+The smoke set is in [`tests/TESTCASES.md`](skills/ssh-session/tests/TESTCASES.md).
 
-## Как это устроено
+## How it works
 
-Демон — дважды форкнутый процесс, владеет pty-мастером и дописывает всё, что
-пришло с сервера, в `out.log`. Клиенты читают этот файл напрямую, поэтому `read`
-работает даже пока команда ещё льёт вывод. Через unix-сокет ходят только
-операции с побочным эффектом: `send` / `info` / `kill`.
+The daemon is a double-forked process that owns the pty master and appends every
+byte coming from the server to `out.log`. Clients read that file directly, so
+`read` works even while a command is still streaming. Only side-effecting
+operations go through the unix socket: `send` / `info` / `kill`.
 
-`run` устроен на двух хитростях, и обе обязательны:
+`run` rests on two tricks, and both are mandatory:
 
-1. Литералы маркеров разорваны кавычками (`'__SS''B...'`), поэтому **эхо**
-   отправленной строки не содержит того текста, который мы ищем. Иначе поиск
-   всегда попадал бы в эхо и резал вывод не там.
-2. Всё завёрнуто в одну группу `{ ... }`. Shell не начнёт выполнение, пока не
-   дочитает закрывающую скобку, поэтому всё эхо оказывается **до** вывода
-   первого маркера — то есть вне вырезаемой области.
+1. The marker literals are split by quotes (`'__SS''B...'`), so the **echo** of
+   the line we send does not contain the text we are searching for. Otherwise the
+   search would always hit the echo and cut the output in the wrong place.
+2. Everything is wrapped in a single `{ ... }` group. The shell will not start
+   executing until it has read the closing brace, so all the echo ends up
+   **before** the first marker's output — that is, outside the region being cut.
 
-Полное описание — включая подводные камни, таблицу диагностики и коды
-возврата — в [`SKILL.md`](skills/ssh-session/SKILL.md). Это же файл, который читает агент.
+The full description — pitfalls, the diagnostics table and the exit codes — is in
+[`SKILL.md`](skills/ssh-session/SKILL.md). That is the very file the agent reads.
 
-## Авторы
+## Authors
 
-Разработано в паре: **Flexlug** — идея, постановка, тестирование;
-**Claude (Anthropic)** — реализация, обкатка на живых хостах, документация.
-Соавторство отражено в коммитах.
+Developed as a pair: **Flexlug** — idea, requirements, testing;
+**Claude (Anthropic)** — implementation, shakedown on live hosts, documentation.
+Co-authorship is reflected in the commits.
 
-Лицензия — [MIT](LICENSE).
+Licensed under [MIT](LICENSE).
